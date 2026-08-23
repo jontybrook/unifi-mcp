@@ -127,6 +127,67 @@ async def test_statistics_shapes_response():
 
 
 @pytest.mark.asyncio
+async def test_statistics_enrichment_preserves_ids_and_handles_partial_catalogue():
+    response = {
+        **_STATS_RESPONSE,
+        "top_all_traffic_by_application": [
+            {"application_id": 470, "category_id": 4, "bytes": 999},
+            {"application_id": 471, "category_id": 5, "bytes": 888},
+            {"application_id": 472, "category_id": 6, "bytes": 777},
+        ],
+    }
+
+    class DpiCatalog:
+        async def get_full_dpi_catalog(self):
+            return {
+                "applications": [
+                    {"id": (4 << 16) | 470, "name": "Example Stream"},
+                    {"id": (5 << 16) | 471, "name": "Partially Covered App"},
+                ],
+                "categories": [{"id": 4, "name": "Media streaming"}],
+            }
+
+    conn = _make_connection(response=response)
+    mgr = TrafficFlowManager(conn, dpi_manager=DpiCatalog())
+
+    result = await mgr.get_traffic_flow_statistics(period="DAY", top=30)
+    applications = result["top_applications"]
+
+    assert [(item["application_id"], item["category_id"], item["bytes"]) for item in applications] == [
+        (470, 4, 999),
+        (471, 5, 888),
+        (472, 6, 777),
+    ]
+    assert [(item["application_name"], item["category_name"]) for item in applications] == [
+        ("Example Stream", "Media streaming"),
+        ("Partially Covered App", None),
+        (None, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_statistics_catalogue_failure_returns_original_statistics():
+    class MissingCatalogue:
+        async def get_full_dpi_catalog(self):
+            raise RuntimeError("no Integration API key")
+
+    conn = _make_connection(response=_STATS_RESPONSE)
+    mgr = TrafficFlowManager(conn, dpi_manager=MissingCatalogue())
+
+    result = await mgr.get_traffic_flow_statistics(period="DAY", top=30)
+
+    assert result["top_applications"] == [
+        {
+            "application_id": 470,
+            "category_id": 4,
+            "bytes": 999,
+            "application_name": None,
+            "category_name": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_statistics_is_cached_within_ttl():
     conn = _make_connection(response=_STATS_RESPONSE)
     mgr = TrafficFlowManager(conn)
